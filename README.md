@@ -4,9 +4,9 @@
 
 Um sistema completo de **Retrieval-Augmented Generation (RAG)** rodando inteiramente client-side: extração de PDF, chunking, embeddings, vector store e geração com citações. Tudo em um único arquivo HTML.
 
-🔗 **[Demo ao vivo](https://SEU-USUARIO.github.io/rag-in-a-box/)** · 🎥 **[Vídeo de 90s](https://loom.com/seu-link)**
+<!-- 🔗 **[Demo ao vivo](https://SEU-USUARIO.github.io/rag-in-a-box/)** · 🎥 **[Vídeo de 90s](https://loom.com/seu-link)** -->
 
-![screenshot](./docs/screenshot.png)
+![screenshot](assets/app.png)
 
 ---
 
