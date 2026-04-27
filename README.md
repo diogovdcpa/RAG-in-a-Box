@@ -178,4 +178,4 @@ MIT — use, modifique, aprenda.
 
 ---
 
-**Feito por [Diogo](https://www.linkedin.com/in/diogovdcpa/)** — **Applied AI Engineer**.
+**Feito por [Diogo Caldas](https://www.linkedin.com/in/diogovdcpa/)** — **Applied AI Engineer**.
