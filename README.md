@@ -82,7 +82,7 @@ Esta seção é o que diferencia este projeto de um "tutorial de RAG". Cada esco
 
 **Justificativa:** para <10k chunks roda em <50ms. HNSW/FAISS no browser (via WASM) seria over-engineering para o caso de uso.
 
-**Quando trocar:** acima de 50k chunks, migrar para [hnswlib-wasm](https://github.com/ChrisGuy/hnswlib-wasm) ou backend com pgvector/Qdrant.
+**Quando trocar:** acima de 50k chunks, migrar como alternativa backend com pgvector/Qdrant.
 
 ### 4. Top-K = 4 chunks
 **Decisão:** recuperar 4 chunks por query.
