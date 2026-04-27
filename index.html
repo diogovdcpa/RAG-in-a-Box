@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<title>RAG-in-a-Box</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+</script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+
+<div class="max-w-5xl mx-auto p-6">
+  <header class="mb-6">
+    <h1 class="text-3xl font-bold">📚 RAG-in-a-Box</h1>
+    <p class="text-slate-400 text-sm">Chat com seus documentos — 100% no navegador</p>
+  </header>
+
+  <!-- API Key -->
+  <div class="mb-4 bg-slate-800 p-4 rounded-lg">
+    <label class="text-sm font-medium">OpenRouter API Key</label>
+    <input id="apiKey" type="password" placeholder="sk-or-v1-..."
+      class="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+    <p class="text-xs text-slate-500 mt-1">Salva apenas no localStorage do seu navegador.</p>
+  </div>
+
+  <!-- Upload -->
+  <div class="mb-4 bg-slate-800 p-4 rounded-lg">
+    <label class="text-sm font-medium">Documentos (PDF ou TXT)</label>
+    <input id="fileInput" type="file" accept=".pdf,.txt" multiple
+      class="mt-2 block w-full text-sm" />
+    <div id="docStats" class="text-xs text-slate-400 mt-2"></div>
+  </div>
+
+  <!-- Chat -->
+  <div class="bg-slate-800 rounded-lg p-4">
+    <div id="chat" class="space-y-4 mb-4 max-h-[400px] overflow-y-auto"></div>
+    <div class="flex gap-2">
+      <input id="question" type="text" placeholder="Pergunte algo sobre os documentos..."
+        class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+      <button id="askBtn"
+        class="bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded text-sm font-medium">
+        Perguntar
+      </button>
+    </div>
+    <div id="metrics" class="text-xs text-slate-500 mt-2"></div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+const CONFIG = {
+  embedModel: "openai/text-embedding-3-small",
+  chatModel: "anthropic/claude-3.5-haiku",
+  chunkSize: 500,      // caracteres aprox.
+  chunkOverlap: 50,
+  topK: 4,
+};
+
+// ============================================================
+// INDEXEDDB — armazenamento de chunks + embeddings
+// ============================================================
+const DB_NAME = "ragbox";
+const STORE = "chunks";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE, { keyPath: "id", autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveChunk(chunk) {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).add(chunk);
+    tx.oncomplete = () => resolve();
+  });
+}
+
+async function getAllChunks() {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+  });
+}
+
+async function clearChunks() {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = () => resolve();
+  });
+}
+
+// ============================================================
+// EXTRAÇÃO DE TEXTO
+// ============================================================
+async function extractText(file) {
+  if (file.type === "text/plain" || file.name.endsWith(".txt")) {
+    return await file.text();
+  }
+  if (file.name.endsWith(".pdf")) {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let text = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += content.items.map((it) => it.str).join(" ") + "\n";
+    }
+    return text;
+  }
+  throw new Error("Formato não suportado");
+}
+
+// ============================================================
+// CHUNKING — sliding window por caracteres
+// ============================================================
+function chunkText(text, size, overlap) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  const chunks = [];
+  let i = 0;
+  while (i < clean.length) {
+    chunks.push(clean.slice(i, i + size));
+    i += size - overlap;
+  }
+  return chunks;
+}
+
+// ============================================================
+// OPENROUTER API
+// ============================================================
+function getKey() {
+  const k = document.getElementById("apiKey").value.trim();
+  if (!k) throw new Error("Informe a API key");
+  localStorage.setItem("orKey", k);
+  return k;
+}
+
+async function embed(texts) {
+  const key = getKey();
+  const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: CONFIG.embedModel, input: texts }),
+  });
+  if (!res.ok) throw new Error(`Embed error: ${await res.text()}`);
+  const data = await res.json();
+  return data.data.map((d) => d.embedding);
+}
+
+async function chat(messages) {
+  const key = getKey();
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: CONFIG.chatModel, messages }),
+  });
+  if (!res.ok) throw new Error(`Chat error: ${await res.text()}`);
+  return await res.json();
+}
+
+// ============================================================
+// SIMILARIDADE
+// ============================================================
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+async function retrieve(query, k) {
+  const [qEmb] = await embed([query]);
+  const all = await getAllChunks();
+  const scored = all.map((c) => ({ ...c, score: cosine(qEmb, c.embedding) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, k);
+}
+
+// ============================================================
+// UI
+// ============================================================
+const chatEl = document.getElementById("chat");
+const metricsEl = document.getElementById("metrics");
+const statsEl = document.getElementById("docStats");
+
+function addMessage(role, html) {
+  const div = document.createElement("div");
+  div.className =
+    role === "user"
+      ? "bg-indigo-900/40 p-3 rounded text-sm"
+      : "bg-slate-700/40 p-3 rounded text-sm";
+  div.innerHTML = `<div class="font-semibold text-xs mb-1 opacity-70">${role}</div>${html}`;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+async function refreshStats() {
+  const all = await getAllChunks();
+  const sources = [...new Set(all.map((c) => c.source))];
+  statsEl.textContent = `${all.length} chunks indexados de ${sources.length} arquivo(s): ${sources.join(", ") || "nenhum"}`;
+}
+
+// ============================================================
+// HANDLERS
+// ============================================================
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+  const files = [...e.target.files];
+  statsEl.textContent = "Processando...";
+  await clearChunks(); // simplificação: nova carga zera o índice
+  for (const file of files) {
+    const text = await extractText(file);
+    const chunks = chunkText(text, CONFIG.chunkSize, CONFIG.chunkOverlap);
+    // batch de embeddings (até 100 por request)
+    const batchSize = 50;
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      const embs = await embed(batch);
+      for (let j = 0; j < batch.length; j++) {
+        await saveChunk({
+          text: batch[j],
+          embedding: embs[j],
+          source: file.name,
+        });
+      }
+      statsEl.textContent = `Indexando ${file.name}: ${Math.min(i + batchSize, chunks.length)}/${chunks.length}`;
+    }
+  }
+  await refreshStats();
+});
+
+document.getElementById("askBtn").addEventListener("click", async () => {
+  const q = document.getElementById("question").value.trim();
+  if (!q) return;
+  document.getElementById("question").value = "";
+  addMessage("user", q);
+
+  const t0 = performance.now();
+  try {
+    const top = await retrieve(q, CONFIG.topK);
+    if (top.length === 0) {
+      addMessage("assistant", "Nenhum documento indexado ainda.");
+      return;
+    }
+
+    const context = top
+      .map((c, i) => `[${i + 1}] (fonte: ${c.source})\n${c.text}`)
+      .join("\n\n");
+
+    const messages = [
+      {
+        role: "system",
+        content:
+          "Você responde APENAS com base no contexto fornecido. Cite as fontes usando [1], [2], etc. Se a resposta não estiver no contexto, diga que não sabe.",
+      },
+      { role: "user", content: `Contexto:\n${context}\n\nPergunta: ${q}` },
+    ];
+
+    const resp = await chat(messages);
+    const answer = resp.choices[0].message.content;
+    const usage = resp.usage || {};
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+    // renderiza resposta + chunks fonte expansíveis
+    const sourcesHtml = top
+      .map(
+        (c, i) => `
+      <details class="mt-2 text-xs bg-slate-900/50 p-2 rounded">
+        <summary class="cursor-pointer">[${i + 1}] ${c.source} — score ${c.score.toFixed(3)}</summary>
+        <div class="mt-1 text-slate-400">${c.text.replace(/</g, "&lt;")}</div>
+      </details>`
+      )
+      .join("");
+
+    addMessage(
+      "assistant",
+      `<div class="whitespace-pre-wrap">${answer}</div>${sourcesHtml}`
+    );
+
+    metricsEl.textContent = `⏱ ${elapsed}s · 🔤 ${usage.total_tokens || "?"} tokens · 📄 ${top.length} chunks recuperados`;
+  } catch (err) {
+    addMessage("assistant", `❌ Erro: ${err.message}`);
+  }
+});
+
+document.getElementById("question").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("askBtn").click();
+});
+
+// init
+document.getElementById("apiKey").value = localStorage.getItem("orKey") || "";
+refreshStats();
+</script>
+</body>
+</html>
